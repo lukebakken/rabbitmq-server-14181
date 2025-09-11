@@ -45,11 +45,12 @@ class DelayedAckConsumer(threading.Thread):
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
 
-        # Random delay from 0 to 30 minutes, with 1% chance of >30 min timeout
+        # Random delay with shorter times for faster ack rate
+        # 1% chance of very long delay (20-35 min), rest are much shorter
         if random.random() < 0.01:
-            delay_seconds = random.randint(1800, 2100)  # 30-35 minutes
+            delay_seconds = random.randint(1200, 2100)  # 20-35 minutes
         else:
-            delay_seconds = random.uniform(0, 1800)  # 0-30 minutes
+            delay_seconds = random.uniform(0, 300)  # 0-5 minutes
 
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
@@ -159,20 +160,20 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=4):
                     # Adjust publishing rate based on queue depth
                     if queue_depth < 5000:
                         # Fast publishing to build backlog
-                        batch_size = 50
-                        sleep_time = 0.1
-                    elif queue_depth < 10000:
-                        # Medium publishing
                         batch_size = 20
                         sleep_time = 0.5
+                    elif queue_depth < 10000:
+                        # Medium publishing
+                        batch_size = 10
+                        sleep_time = 1.0
                     else:
                         # Slow maintenance publishing
-                        batch_size = 5
-                        sleep_time = 2.0
+                        batch_size = 2
+                        sleep_time = 3.0
                 except:
                     # Default to medium rate if can't check queue
-                    batch_size = 20
-                    sleep_time = 0.5
+                    batch_size = 10
+                    sleep_time = 1.0
 
             # Publish batch
             for i in range(batch_size):
