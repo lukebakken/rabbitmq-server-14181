@@ -59,26 +59,23 @@ class DelayedAckConsumer(threading.Thread):
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
 
+    def open_channel_and_consume(self):
+        self.channel = self.connection.channel()
+        self.channel.basic_qos(prefetch_count=100)
+        self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+        print(f"Consumer {self.consumer_tag} started")
+
     def reconnect(self):
         """Reconnect after channel failure"""
         try:
-            # Only recreate channel if connection is still good
-            if self.connection and not self.connection.is_closed:
-                self.channel = self.connection.channel()
-                self.channel.basic_qos(prefetch_count=100)
-                self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
-                self.pending_acks.clear()  # Clear old delivery tags
-                print(f"Consumer {self.consumer_tag} recreated channel")
-                return True
-            else:
-                # Connection is also bad, recreate both
+            self.pending_acks.clear()  # Clear old delivery tags
+            if self.connection is None or self.connection.is_closed:
+                # Connection is bad, recreate
                 self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
-                self.channel = self.connection.channel()
-                self.channel.basic_qos(prefetch_count=100)
-                self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
-                self.pending_acks.clear()  # Clear old delivery tags
                 print(f"Consumer {self.consumer_tag} reconnected")
-                return True
+            self.open_channel_and_consume()
+            print(f"Consumer {self.consumer_tag} recreated channel")
+            return True
         except Exception as e:
             print(f"Consumer {self.consumer_tag} reconnect failed: {e}")
             return False
@@ -115,10 +112,7 @@ class DelayedAckConsumer(threading.Thread):
     def run(self):
         try:
             self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
-            self.channel = self.connection.channel()
-            self.channel.basic_qos(prefetch_count=100)
-            self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
-            print(f"Consumer {self.consumer_tag} started")
+            self.open_channel_and_consume()
 
             # Process messages and acks in same thread
             while self.running:
