@@ -36,7 +36,7 @@ class DelayedAckConsumer(threading.Thread):
     def __init__(self, queue_name, consumer_id):
         super().__init__()
         self.queue_name = queue_name
-        self.consumer_id = consumer_id
+        self.consumer_tag = f"delayed-ack-consumer-{consumer_id}"
         self.connection = None
         self.channel = None
         self.pending_acks = {}
@@ -54,6 +54,28 @@ class DelayedAckConsumer(threading.Thread):
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
 
+    def reconnect(self):
+        """Reconnect after channel failure"""
+        try:
+            # Only recreate channel if connection is still good
+            if self.connection and not self.connection.is_closed:
+                self.channel = self.connection.channel()
+                self.channel.basic_qos(prefetch_count=100)
+                self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+                print(f"Consumer {self.consumer_tag} recreated channel")
+                return True
+            else:
+                # Connection is also bad, recreate both
+                self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+                self.channel = self.connection.channel()
+                self.channel.basic_qos(prefetch_count=100)
+                self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+                print(f"Consumer {self.consumer_tag} reconnected")
+                return True
+        except Exception as e:
+            print(f"Consumer {self.consumer_tag} reconnect failed: {e}")
+            return False
+
     def process_pending_acks(self):
         """Process pending acks - called periodically"""
         now = datetime.now()
@@ -65,10 +87,17 @@ class DelayedAckConsumer(threading.Thread):
 
         for delivery_tag in to_ack:
             try:
-                self.channel.basic_ack(delivery_tag=delivery_tag)
-                del self.pending_acks[delivery_tag]
+                if self.channel and self.channel.is_open:
+                    self.channel.basic_ack(delivery_tag=delivery_tag)
+                    del self.pending_acks[delivery_tag]
+                else:
+                    # Channel closed, clear this ack (message will be redelivered)
+                    del self.pending_acks[delivery_tag]
             except Exception as e:
-                print(f"Consumer {self.consumer_id} ack error: {e}")
+                print(f"Consumer {self.consumer_tag} ack error: {e}")
+                # Clear the ack on error
+                if delivery_tag in self.pending_acks:
+                    del self.pending_acks[delivery_tag]
 
     def stop(self):
         """Stop the consumer"""
@@ -81,23 +110,33 @@ class DelayedAckConsumer(threading.Thread):
             self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
             self.channel = self.connection.channel()
             self.channel.basic_qos(prefetch_count=100)
-
-            self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback)
-            print(f"Consumer {self.consumer_id} started")
+            self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+            print(f"Consumer {self.consumer_tag} started")
 
             # Process messages and acks in same thread
             while self.running:
                 try:
+                    if not self.channel or not self.channel.is_open:
+                        print(f"Consumer {self.consumer_tag} channel closed, reconnecting...")
+                        if not self.reconnect():
+                            time.sleep(5)  # Wait before retry
+                            continue
+
                     self.connection.process_data_events(time_limit=1)
                     self.process_pending_acks()
+
                 except Exception as e:
-                    print(f"Consumer {self.consumer_id} processing error: {e}")
-                    break
+                    print(f"Consumer {self.consumer_tag} processing error: {e}")
+                    # Try to reconnect on error
+                    if not self.reconnect():
+                        time.sleep(5)
 
         except Exception as e:
-            print(f"Consumer {self.consumer_id} error: {e}")
+            print(f"Consumer {self.consumer_tag} error: {e}")
         finally:
             self.running = False
+            if self.connection and not self.connection.is_closed:
+                self.connection.close()
             if self.connection and not self.connection.is_closed:
                 self.connection.close()
 
