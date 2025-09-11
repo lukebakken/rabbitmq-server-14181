@@ -73,8 +73,8 @@ class DelayedAckConsumer(threading.Thread):
                 # Connection is bad, recreate
                 self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
                 print(f"Consumer {self.consumer_tag} reconnected")
+            print(f"Consumer {self.consumer_tag} recreating channel and starting")
             self.open_channel_and_consume()
-            print(f"Consumer {self.consumer_tag} recreated channel")
             return True
         except Exception as e:
             print(f"Consumer {self.consumer_tag} reconnect failed: {e}")
