@@ -9,7 +9,11 @@ import time
 import random
 import sys
 import functools
+import argparse
 from datetime import datetime, timedelta
+
+# Global connection parameters
+CONNECTION_PARAMS = None
 
 # Pre-computed message bodies
 MESSAGE_BODIES = []
@@ -63,14 +67,16 @@ class DelayedAckConsumer(threading.Thread):
                 self.channel = self.connection.channel()
                 self.channel.basic_qos(prefetch_count=100)
                 self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+                self.pending_acks.clear()  # Clear old delivery tags
                 print(f"Consumer {self.consumer_tag} recreated channel")
                 return True
             else:
                 # Connection is also bad, recreate both
-                self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+                self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
                 self.channel = self.connection.channel()
                 self.channel.basic_qos(prefetch_count=100)
                 self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
+                self.pending_acks.clear()  # Clear old delivery tags
                 print(f"Consumer {self.consumer_tag} reconnected")
                 return True
         except Exception as e:
@@ -108,7 +114,7 @@ class DelayedAckConsumer(threading.Thread):
 
     def run(self):
         try:
-            self.connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+            self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
             self.channel = self.connection.channel()
             self.channel.basic_qos(prefetch_count=100)
             self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
@@ -144,7 +150,7 @@ class DelayedAckConsumer(threading.Thread):
 def publisher_worker(queue_name, publisher_id, runtime_hours=4):
     """Publisher with priority messages that runs for specified hours"""
     try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        connection = pika.BlockingConnection(CONNECTION_PARAMS)
         channel = connection.channel()
 
         end_time = time.time() + (runtime_hours * 3600)  # 4 hours
@@ -212,7 +218,7 @@ def monitor_progress(queue_name, consumers, runtime_hours=4):
 
     while time.time() < end_time:
         try:
-            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+            connection = pika.BlockingConnection(CONNECTION_PARAMS)
             channel = connection.channel()
             method = channel.queue_declare(queue=queue_name, passive=True)
             queue_depth = method.method.message_count
@@ -232,7 +238,7 @@ def create_initial_backlog(queue_name, target_backlog=10000):
     """Create initial 10K message backlog"""
     print(f"Creating initial backlog of {target_backlog} messages...")
 
-    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    connection = pika.BlockingConnection(CONNECTION_PARAMS)
     channel = connection.channel()
 
     # Declare priority queue
@@ -266,7 +272,18 @@ def create_initial_backlog(queue_name, target_backlog=10000):
     print("Initial backlog created")
 
 def main():
+    global CONNECTION_PARAMS
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
+    parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
+    args = parser.parse_args()
+
+    # Set up connection parameters
+    CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host)
+
     print("Fixed RabbitMQ Message Store Bug Reproduction")
+    print(f"Connecting to RabbitMQ at {args.host}")
     print("Generating message bodies...")
     generate_message_bodies()
 
@@ -322,7 +339,7 @@ def main():
 
         # Cleanup
         try:
-            connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+            connection = pika.BlockingConnection(CONNECTION_PARAMS)
             channel = connection.channel()
             channel.queue_delete(queue=queue_name)
             connection.close()
