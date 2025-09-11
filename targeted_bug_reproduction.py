@@ -119,7 +119,7 @@ class DelayedAckConsumer(threading.Thread):
                     if not self.channel or not self.channel.is_open:
                         print(f"Consumer {self.consumer_tag} channel closed, reconnecting...")
                         if not self.reconnect():
-                            time.sleep(5)  # Wait before retry
+                            self.connection.process_data_events(5)
                             continue
 
                     self.connection.process_data_events(time_limit=1)
@@ -129,7 +129,7 @@ class DelayedAckConsumer(threading.Thread):
                     print(f"Consumer {self.consumer_tag} processing error: {e}")
                     # Try to reconnect on error
                     if not self.reconnect():
-                        time.sleep(5)
+                        self.connection.process_data_events(5)
 
         except Exception as e:
             print(f"Consumer {self.consumer_tag} error: {e}")
