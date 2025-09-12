@@ -19,40 +19,22 @@ CONNECTION_PARAMS = None
 MESSAGE_BODIES = []
 
 def generate_message_bodies():
-    """Pre-generate message bodies with expanded size distribution"""
+    """Pre-generate message bodies with specific characteristics"""
     global MESSAGE_BODIES
 
-    # Tiny messages (<1KB) - 30%
-    for i in range(30):
-        size = random.randint(50, 1000)
+    # Small messages (<4KB)
+    for i in range(50):
+        size = random.randint(100, 4000)
         body = bytes([255] * size)
         MESSAGE_BODIES.append(body)
 
-    # Small messages (1-4KB) - 30%
-    for i in range(30):
-        size = random.randint(1024, 4096)
-        body = bytes([255] * size)
-        MESSAGE_BODIES.append(body)
-
-    # Medium messages (4-16KB) - 20%
-    for i in range(20):
+    # Large messages (4KB-16KB)
+    for i in range(50):
         size = random.randint(4096, 16384)
         body = bytes([255] * size)
         MESSAGE_BODIES.append(body)
 
-    # Large messages (16-64KB) - 15%
-    for i in range(15):
-        size = random.randint(16384, 65536)
-        body = bytes([255] * size)
-        MESSAGE_BODIES.append(body)
-
-    # Very large messages (64-256KB) - 5%
-    for i in range(5):
-        size = random.randint(65536, 262144)
-        body = bytes([255] * size)
-        MESSAGE_BODIES.append(body)
-
-    print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies (5 size categories)")
+    print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies")
 
 class DelayedAckConsumer(threading.Thread):
     def __init__(self, queue_name, consumer_id, consumer_timeout_minutes):
