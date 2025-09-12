@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed RabbitMQ message store bug reproduction with proper threading
+RabbitMQ message store bug reproduction
 """
 
 import pika
@@ -173,7 +173,7 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=4):
                     else:
                         # Slow maintenance publishing
                         batch_size = 2
-                        sleep_time = 3.0
+                        sleep_time = 5.0
                 except:
                     # Default to medium rate if can't check queue
                     batch_size = 10
@@ -500,10 +500,8 @@ def main():
         perftest_status = "PerfTest workload: DISABLED (use --enable-perftest to enable)"
 
     print("Optimized reproduction test running...")
-    print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes (original pattern)")
+    print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes")
     print(f"- {perftest_status}")
-    if args.enable_perftest:
-        print("- Fragmentation period: 95+ minutes (matches original 1.5+ hour successful test)")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
