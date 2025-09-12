@@ -292,17 +292,17 @@ def perftest_workload(base_queue_name, consumer_timeout_ms, runtime_hours=2):
                 message_count = 0
 
                 while time.time() < burst_end:
-                    # Variable message sizes (16KB-96KB) - use pre-computed bodies for speed
+                    # Smaller variable message sizes (4KB-16KB) to avoid memory alarms
                     if random.random() < 0.3:
-                        # Use largest pre-computed messages and pad if needed
-                        base_body = random.choice(MESSAGE_BODIES[-5:])  # Largest 5 messages
-                        target_size = random.randint(16384, 32768)
+                        # Use medium pre-computed messages
+                        base_body = random.choice(MESSAGE_BODIES[50:70])  # Medium messages
+                        target_size = random.randint(4096, 8192)  # 4-8KB
                     elif random.random() < 0.6:
-                        base_body = random.choice(MESSAGE_BODIES[-5:])
-                        target_size = random.randint(32768, 65536)
+                        base_body = random.choice(MESSAGE_BODIES[70:85])  # Large messages
+                        target_size = random.randint(8192, 12288)  # 8-12KB
                     else:
-                        base_body = random.choice(MESSAGE_BODIES[-5:])
-                        target_size = random.randint(65536, 98304)
+                        base_body = random.choice(MESSAGE_BODIES[85:])  # Largest messages
+                        target_size = random.randint(12288, 16384)  # 12-16KB
 
                     # Pad to target size efficiently
                     if len(base_body) < target_size:
@@ -453,6 +453,8 @@ def main():
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
     parser.add_argument('--consumer-timeout', type=int, default=30,
                        help='Consumer timeout in minutes (minimum: 5, default: 30)')
+    parser.add_argument('--enable-perftest', action='store_true', default=False,
+                       help='Enable PerfTest concurrent workload (default: disabled)')
     args = parser.parse_args()
 
     # Validate consumer timeout
@@ -498,22 +500,28 @@ def main():
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
     monitor_thread.start()
 
-    # Start PerfTest workload after 3 consumer timeout cycles plus buffer (matches original 1.5h test)
-    # Each cycle is (timeout_minutes + 1) since timeouts start at timeout+1 minutes
-    # Add 2 minutes buffer to ensure all three cycles complete
-    perftest_delay_seconds = (3 * (consumer_timeout_minutes + 1) + 2) * 60
-    def start_perftest_delayed():
-        print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
-        time.sleep(perftest_delay_seconds)
-        perftest_workload(queue_name, consumer_timeout_ms, 2)
+    # Conditionally start PerfTest workload if enabled
+    if args.enable_perftest:
+        # Start PerfTest workload after 3 consumer timeout cycles plus buffer (matches original 1.5h test)
+        # Each cycle is (timeout_minutes + 1) since timeouts start at timeout+1 minutes
+        # Add 2 minutes buffer to ensure all three cycles complete
+        perftest_delay_seconds = (3 * (consumer_timeout_minutes + 1) + 2) * 60
+        def start_perftest_delayed():
+            print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
+            time.sleep(perftest_delay_seconds)
+            perftest_workload(queue_name, consumer_timeout_ms, 2)
 
-    perftest_thread = threading.Thread(target=start_perftest_delayed)
-    perftest_thread.start()
+        perftest_thread = threading.Thread(target=start_perftest_delayed)
+        perftest_thread.start()
+        perftest_status = f"PerfTest workload: Starts after {perftest_delay_seconds//60} minutes (3 timeout cycles + buffer)"
+    else:
+        perftest_status = "PerfTest workload: DISABLED (use --enable-perftest to enable)"
 
     print("Optimized reproduction test running...")
     print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes (original pattern)")
-    print(f"- PerfTest workload: Starts after {perftest_delay_seconds//60} minutes (3 timeout cycles + buffer)")
-    print("- Fragmentation period: 95+ minutes (matches original 1.5+ hour successful test)")
+    print(f"- {perftest_status}")
+    if args.enable_perftest:
+        print("- Fragmentation period: 95+ minutes (matches original 1.5+ hour successful test)")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
