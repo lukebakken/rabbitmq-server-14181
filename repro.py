@@ -498,8 +498,10 @@ def main():
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
     monitor_thread.start()
 
-    # Start PerfTest workload after 2 consumer timeout cycles
-    perftest_delay_seconds = 2 * consumer_timeout_minutes * 60
+    # Start PerfTest workload after 2 consumer timeout cycles plus buffer
+    # Each cycle is (timeout_minutes + 1) since timeouts start at timeout+1 minutes
+    # Add 2 minutes buffer to ensure both cycles complete
+    perftest_delay_seconds = (2 * (consumer_timeout_minutes + 1) + 2) * 60
     def start_perftest_delayed():
         print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
         time.sleep(perftest_delay_seconds)
