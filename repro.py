@@ -19,22 +19,40 @@ CONNECTION_PARAMS = None
 MESSAGE_BODIES = []
 
 def generate_message_bodies():
-    """Pre-generate message bodies with specific characteristics"""
+    """Pre-generate message bodies with expanded size distribution"""
     global MESSAGE_BODIES
 
-    # Small messages (<4KB)
-    for i in range(50):
-        size = random.randint(100, 4000)
+    # Tiny messages (<1KB) - 30%
+    for i in range(30):
+        size = random.randint(50, 1000)
         body = bytes([255] * size)
         MESSAGE_BODIES.append(body)
 
-    # Large messages (4KB-16KB)
-    for i in range(50):
+    # Small messages (1-4KB) - 30%
+    for i in range(30):
+        size = random.randint(1024, 4096)
+        body = bytes([255] * size)
+        MESSAGE_BODIES.append(body)
+
+    # Medium messages (4-16KB) - 20%
+    for i in range(20):
         size = random.randint(4096, 16384)
         body = bytes([255] * size)
         MESSAGE_BODIES.append(body)
 
-    print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies")
+    # Large messages (16-64KB) - 15%
+    for i in range(15):
+        size = random.randint(16384, 65536)
+        body = bytes([255] * size)
+        MESSAGE_BODIES.append(body)
+
+    # Very large messages (64-256KB) - 5%
+    for i in range(5):
+        size = random.randint(65536, 262144)
+        body = bytes([255] * size)
+        MESSAGE_BODIES.append(body)
+
+    print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies (5 size categories)")
 
 class DelayedAckConsumer(threading.Thread):
     def __init__(self, queue_name, consumer_id):
@@ -49,12 +67,11 @@ class DelayedAckConsumer(threading.Thread):
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
 
-        # Random delay with shorter times for faster ack rate
-        # 1% chance of very long delay (20-35 min), rest are much shorter
-        if random.random() < 0.01:
-            delay_seconds = random.randint(1200, 2100)  # 20-35 minutes
+        # Random delay with 5% chance of timeout (6+ min), rest are shorter
+        if random.random() < 0.05:
+            delay_seconds = random.randint(360, 480)  # 6-8 minutes (will timeout)
         else:
-            delay_seconds = random.uniform(0, 300)  # 0-5 minutes
+            delay_seconds = random.uniform(0, 300)  # 0-5 minutes (safe)
 
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
@@ -228,6 +245,157 @@ def monitor_progress(queue_name, consumers, runtime_hours=4):
 
         time.sleep(60)  # Report every minute
 
+def perftest_workload(base_queue_name, runtime_hours=4):
+    """PerfTest-like concurrent workload with separate queue and bidirectional I/O"""
+    perftest_queue = f"perftest_{base_queue_name}"
+    print(f"Starting PerfTest-like workload on queue: {perftest_queue}")
+
+    # Declare the PerfTest queue
+    try:
+        setup_connection = pika.BlockingConnection(CONNECTION_PARAMS)
+        setup_channel = setup_connection.channel()
+        setup_channel.queue_declare(
+            queue=perftest_queue,
+            durable=True,
+            arguments={
+                'x-queue-type': 'classic',
+                'x-max-priority': 10,
+                'x-consumer-timeout': 300000  # 5 minutes
+            }
+        )
+        setup_connection.close()
+        print(f"PerfTest queue {perftest_queue} declared")
+    except Exception as e:
+        print(f"PerfTest queue setup error: {e}")
+        return
+
+    def perftest_producer():
+        """PerfTest producer with cycling pattern"""
+        try:
+            connection = pika.BlockingConnection(CONNECTION_PARAMS)
+            channel = connection.channel()
+
+            end_time = time.time() + (runtime_hours * 3600)
+            cycle_count = 0
+
+            while time.time() < end_time:
+                cycle_count += 1
+                print(f"PerfTest producer cycle {cycle_count}: Starting 2-minute burst...")
+
+                # 2-minute active period
+                burst_end = time.time() + 120
+                message_count = 0
+
+                while time.time() < burst_end:
+                    # Variable message sizes (16KB-96KB)
+                    if random.random() < 0.3:
+                        size = random.randint(16384, 32768)  # 16-32KB
+                    elif random.random() < 0.6:
+                        size = random.randint(32768, 65536)  # 32-64KB
+                    else:
+                        size = random.randint(65536, 98304)  # 64-96KB
+
+                    message_body = bytes([random.randint(0, 255) for _ in range(size)])
+
+                    # Priority distribution similar to main workload (90% priority 1, 10% mixed)
+                    if random.random() < 0.9:
+                        priority = 1
+                    else:
+                        priority = random.randint(2, 10)
+
+                    channel.basic_publish(
+                        exchange='',
+                        routing_key=perftest_queue,
+                        body=message_body,
+                        properties=pika.BasicProperties(
+                            delivery_mode=2,  # Persistent
+                            priority=priority
+                        )
+                    )
+                    message_count += 1
+
+                    # Brief pause between messages
+                    connection.process_data_events(0.01)
+
+                print(f"PerfTest producer cycle {cycle_count}: Sent {message_count} messages, pausing...")
+
+                # 5-minute pause period
+                connection.process_data_events(300)
+
+            connection.close()
+            print("PerfTest producer completed")
+
+        except Exception as e:
+            print(f"PerfTest producer error: {e}")
+
+    def perftest_consumer():
+        """PerfTest consumer with multi-ack"""
+        try:
+            connection = pika.BlockingConnection(CONNECTION_PARAMS)
+            channel = connection.channel()
+            channel.basic_qos(prefetch_count=100)  # Same as main consumers
+
+            ack_batch = []
+            batch_size = 10  # Multi-ack every 10 messages
+
+            def callback(ch, method, properties, body):
+                ack_batch.append(method.delivery_tag)
+
+                # Multi-ack when batch is full
+                if len(ack_batch) >= batch_size:
+                    try:
+                        # Ack the highest delivery tag with multiple=True
+                        ch.basic_ack(delivery_tag=max(ack_batch), multiple=True)
+                        ack_batch.clear()
+                    except Exception as e:
+                        print(f"PerfTest consumer ack error: {e}")
+                        ack_batch.clear()
+
+            channel.basic_consume(queue=perftest_queue, on_message_callback=callback)
+
+            end_time = time.time() + (runtime_hours * 3600)
+            while time.time() < end_time:
+                try:
+                    connection.process_data_events(time_limit=1)
+
+                    # Periodic cleanup of remaining acks
+                    if ack_batch and random.random() < 0.1:  # 10% chance per second
+                        try:
+                            channel.basic_ack(delivery_tag=max(ack_batch), multiple=True)
+                            ack_batch.clear()
+                        except:
+                            ack_batch.clear()
+
+                except Exception as e:
+                    print(f"PerfTest consumer processing error: {e}")
+                    break
+
+            # Final ack cleanup
+            if ack_batch:
+                try:
+                    channel.basic_ack(delivery_tag=max(ack_batch), multiple=True)
+                except:
+                    pass
+
+            connection.close()
+            print("PerfTest consumer completed")
+
+        except Exception as e:
+            print(f"PerfTest consumer error: {e}")
+
+    # Start both producer and consumer threads
+    producer_thread = threading.Thread(target=perftest_producer)
+    consumer_thread = threading.Thread(target=perftest_consumer)
+
+    producer_thread.start()
+    consumer_thread.start()
+
+    # Wait for both to complete
+    producer_thread.join()
+    consumer_thread.join()
+
+    print("PerfTest workload completed")
+
 def create_initial_backlog(queue_name, target_backlog=10000):
     """Create initial 10K message backlog"""
     print(f"Creating initial backlog of {target_backlog} messages...")
@@ -235,13 +403,14 @@ def create_initial_backlog(queue_name, target_backlog=10000):
     connection = pika.BlockingConnection(CONNECTION_PARAMS)
     channel = connection.channel()
 
-    # Declare priority queue
+    # Declare priority queue with consumer timeout
     channel.queue_declare(
         queue=queue_name,
         durable=True,
         arguments={
             'x-queue-type': 'classic',
-            'x-max-priority': 10
+            'x-max-priority': 10,
+            'x-consumer-timeout': 300000  # 5 minutes in milliseconds
         }
     )
 
@@ -305,10 +474,22 @@ def main():
 
     # Start progress monitor
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 4))
-    monitor_thread.daemon = True
     monitor_thread.start()
 
-    print("4-hour test running... Monitor RabbitMQ logs for function_clause errors")
+    # Start PerfTest workload after 12 minutes (2 consumer timeout cycles)
+    def start_perftest_delayed():
+        print("Waiting 12 minutes for consumer timeouts before starting PerfTest workload...")
+        time.sleep(720)  # 12 minutes
+        perftest_workload(queue_name, 4)
+
+    perftest_thread = threading.Thread(target=start_perftest_delayed)
+    perftest_thread.start()
+
+    print("Optimized reproduction test running...")
+    print("- Consumer timeouts: 5% of acks will timeout after 6+ minutes")
+    print("- PerfTest workload: Starts after 12 minutes with 2min on/5min off cycles")
+    print("- Expected bug trigger: Within 30 minutes")
+    print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
     try:
