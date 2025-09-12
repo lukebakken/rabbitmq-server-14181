@@ -55,7 +55,7 @@ def generate_message_bodies():
     print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies (5 size categories)")
 
 class DelayedAckConsumer(threading.Thread):
-    def __init__(self, queue_name, consumer_id):
+    def __init__(self, queue_name, consumer_id, consumer_timeout_minutes):
         super().__init__()
         self.queue_name = queue_name
         self.consumer_tag = f"delayed-ack-consumer-{consumer_id}"
@@ -63,15 +63,20 @@ class DelayedAckConsumer(threading.Thread):
         self.channel = None
         self.pending_acks = {}
         self.running = True
+        self.consumer_timeout_minutes = consumer_timeout_minutes
 
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
 
-        # Random delay with 5% chance of timeout (6+ min), rest are shorter
+        # Random delay with 5% chance of timeout, rest are safe
+        # Safe range: 0 to timeout_minutes, Timeout range: (timeout_minutes + 1) to (timeout_minutes + 3)
         if random.random() < 0.05:
-            delay_seconds = random.randint(360, 480)  # 6-8 minutes (will timeout)
+            delay_seconds = random.randint(
+                (self.consumer_timeout_minutes + 1) * 60, 
+                (self.consumer_timeout_minutes + 3) * 60
+            )  # Will timeout
         else:
-            delay_seconds = random.uniform(0, 300)  # 0-5 minutes (safe)
+            delay_seconds = random.uniform(0, self.consumer_timeout_minutes * 60)  # Safe
 
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
@@ -245,7 +250,7 @@ def monitor_progress(queue_name, consumers, runtime_hours=4):
 
         time.sleep(60)  # Report every minute
 
-def perftest_workload(base_queue_name, runtime_hours=4):
+def perftest_workload(base_queue_name, consumer_timeout_ms, runtime_hours=2):
     """PerfTest-like concurrent workload with separate queue and bidirectional I/O"""
     perftest_queue = f"perftest_{base_queue_name}"
     print(f"Starting PerfTest-like workload on queue: {perftest_queue}")
@@ -260,7 +265,7 @@ def perftest_workload(base_queue_name, runtime_hours=4):
             arguments={
                 'x-queue-type': 'classic',
                 'x-max-priority': 10,
-                'x-consumer-timeout': 300000  # 5 minutes
+                'x-consumer-timeout': consumer_timeout_ms
             }
         )
         setup_connection.close()
@@ -402,7 +407,7 @@ def perftest_workload(base_queue_name, runtime_hours=4):
 
     print("PerfTest workload completed")
 
-def create_initial_backlog(queue_name, target_backlog=10000):
+def create_initial_backlog(queue_name, consumer_timeout_ms, target_backlog=10000):
     """Create initial 10K message backlog"""
     print(f"Creating initial backlog of {target_backlog} messages...")
 
@@ -416,7 +421,7 @@ def create_initial_backlog(queue_name, target_backlog=10000):
         arguments={
             'x-queue-type': 'classic',
             'x-max-priority': 10,
-            'x-consumer-timeout': 300000  # 5 minutes in milliseconds
+            'x-consumer-timeout': consumer_timeout_ms
         }
     )
 
@@ -446,63 +451,75 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
+    parser.add_argument('--consumer-timeout', type=int, default=5, 
+                       help='Consumer timeout in minutes (minimum: 5, default: 5)')
     args = parser.parse_args()
+
+    # Validate consumer timeout
+    if args.consumer_timeout < 5:
+        print("Error: --consumer-timeout must be at least 5 minutes")
+        sys.exit(1)
+
+    consumer_timeout_minutes = args.consumer_timeout
+    consumer_timeout_ms = consumer_timeout_minutes * 60 * 1000
 
     # Set up connection parameters
     CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host)
 
     print("Fixed RabbitMQ Message Store Bug Reproduction")
     print(f"Connecting to RabbitMQ at {args.host}")
+    print(f"Consumer timeout: {consumer_timeout_minutes} minutes")
     print("Generating message bodies...")
     generate_message_bodies()
 
     queue_name = f"priority_bug_test_{int(time.time())}"
 
     # Create initial backlog
-    create_initial_backlog(queue_name)
+    create_initial_backlog(queue_name, consumer_timeout_ms)
 
     print("Starting publishers and consumers...")
 
-    # Start 15 publishers for 4-hour runtime
+    # Start 15 publishers for 2-hour runtime
     publishers = []
     for i in range(15):
-        t = threading.Thread(target=publisher_worker, args=(queue_name, i, 4))  # 4 hours
+        t = threading.Thread(target=publisher_worker, args=(queue_name, i, 2))  # 2 hours
         publishers.append(t)
         t.start()
 
     # Start 20 consumers with delayed acks
     consumers = []
     for i in range(20):
-        consumer = DelayedAckConsumer(queue_name, i)
+        consumer = DelayedAckConsumer(queue_name, i, consumer_timeout_minutes)
         consumers.append(consumer)
         consumer.start()
         time.sleep(0.2)  # Stagger consumer starts
 
     # Start progress monitor
-    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 4))
+    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
     monitor_thread.start()
 
-    # Start PerfTest workload after 12 minutes (2 consumer timeout cycles)
+    # Start PerfTest workload after 2 consumer timeout cycles
+    perftest_delay_seconds = 2 * consumer_timeout_minutes * 60
     def start_perftest_delayed():
-        print("Waiting 12 minutes for consumer timeouts before starting PerfTest workload...")
-        time.sleep(720)  # 12 minutes
-        perftest_workload(queue_name, 4)
+        print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
+        time.sleep(perftest_delay_seconds)
+        perftest_workload(queue_name, consumer_timeout_ms, 2)
 
     perftest_thread = threading.Thread(target=start_perftest_delayed)
     perftest_thread.start()
 
     print("Optimized reproduction test running...")
-    print("- Consumer timeouts: 5% of acks will timeout after 6+ minutes")
-    print("- PerfTest workload: Starts after 12 minutes with 2min on/5min off cycles")
-    print("- Expected bug trigger: Within 30 minutes")
+    print(f"- Consumer timeouts: 5% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes")
+    print(f"- PerfTest workload: Starts after {perftest_delay_seconds//60} minutes with 2min on/5min off cycles")
+    print("- Expected bug trigger: Within 30 minutes of PerfTest start")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
     try:
-        # Wait for publishers (4 hours)
+        # Wait for publishers (2 hours)
         for t in publishers:
             t.join()
-        print("All publishers completed after 4 hours")
+        print("All publishers completed after 2 hours")
 
         # Wait a bit more for final consumer processing
         time.sleep(300)  # 5 minutes
