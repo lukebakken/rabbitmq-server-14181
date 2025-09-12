@@ -72,7 +72,7 @@ class DelayedAckConsumer(threading.Thread):
         # Safe range: 0 to timeout_minutes, Timeout range: (timeout_minutes + 1) to (timeout_minutes + 3)
         if random.random() < 0.05:
             delay_seconds = random.randint(
-                (self.consumer_timeout_minutes + 1) * 60, 
+                (self.consumer_timeout_minutes + 1) * 60,
                 (self.consumer_timeout_minutes + 3) * 60
             )  # Will timeout
         else:
@@ -451,8 +451,8 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
-    parser.add_argument('--consumer-timeout', type=int, default=5, 
-                       help='Consumer timeout in minutes (minimum: 5, default: 5)')
+    parser.add_argument('--consumer-timeout', type=int, default=30,
+                       help='Consumer timeout in minutes (minimum: 5, default: 30)')
     args = parser.parse_args()
 
     # Validate consumer timeout
