@@ -50,12 +50,12 @@ class DelayedAckConsumer(threading.Thread):
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
 
-        # Random delay with 1% chance of timeout, rest are short for good flow (original pattern)
+        # Random delay with 5% chance of long delay or timeout, rest are short for good flow (original pattern)
         # Safe range: 0-5 minutes (for message flow), Timeout range: (timeout_minutes + 1) to (timeout_minutes + 3)
-        if random.random() < 0.01:
+        if random.random() < 0.05:
             delay_seconds = random.randint(
-                (self.consumer_timeout_minutes + 1) * 60,
-                (self.consumer_timeout_minutes + 3) * 60
+                (self.consumer_timeout_minutes // 2) * 60,
+                (self.consumer_timeout_minutes + 5) * 60
             )  # Will timeout
         else:
             delay_seconds = random.uniform(0, 300)  # Keep at 0-5 minutes for good flow
