@@ -287,15 +287,24 @@ def perftest_workload(base_queue_name, runtime_hours=4):
                 message_count = 0
 
                 while time.time() < burst_end:
-                    # Variable message sizes (16KB-96KB)
+                    # Variable message sizes (16KB-96KB) - use pre-computed bodies for speed
                     if random.random() < 0.3:
-                        size = random.randint(16384, 32768)  # 16-32KB
+                        # Use largest pre-computed messages and pad if needed
+                        base_body = random.choice(MESSAGE_BODIES[-5:])  # Largest 5 messages
+                        target_size = random.randint(16384, 32768)
                     elif random.random() < 0.6:
-                        size = random.randint(32768, 65536)  # 32-64KB
+                        base_body = random.choice(MESSAGE_BODIES[-5:])
+                        target_size = random.randint(32768, 65536)
                     else:
-                        size = random.randint(65536, 98304)  # 64-96KB
+                        base_body = random.choice(MESSAGE_BODIES[-5:])
+                        target_size = random.randint(65536, 98304)
 
-                    message_body = bytes([random.randint(0, 255) for _ in range(size)])
+                    # Pad to target size efficiently
+                    if len(base_body) < target_size:
+                        padding_needed = target_size - len(base_body)
+                        message_body = base_body + bytes([255] * padding_needed)
+                    else:
+                        message_body = base_body[:target_size]
 
                     # Priority distribution similar to main workload (90% priority 1, 10% mixed)
                     if random.random() < 0.9:
@@ -313,9 +322,6 @@ def perftest_workload(base_queue_name, runtime_hours=4):
                         )
                     )
                     message_count += 1
-
-                    # Brief pause between messages
-                    connection.process_data_events(0.01)
 
                 print(f"PerfTest producer cycle {cycle_count}: Sent {message_count} messages, pausing...")
 
