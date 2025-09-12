@@ -68,9 +68,9 @@ class DelayedAckConsumer(threading.Thread):
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
 
-        # Random delay with 5% chance of timeout, rest are short for good flow
+        # Random delay with 1% chance of timeout, rest are short for good flow (original pattern)
         # Safe range: 0-5 minutes (for message flow), Timeout range: (timeout_minutes + 1) to (timeout_minutes + 3)
-        if random.random() < 0.05:
+        if random.random() < 0.01:
             delay_seconds = random.randint(
                 (self.consumer_timeout_minutes + 1) * 60,
                 (self.consumer_timeout_minutes + 3) * 60
@@ -498,10 +498,10 @@ def main():
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
     monitor_thread.start()
 
-    # Start PerfTest workload after 2 consumer timeout cycles plus buffer
+    # Start PerfTest workload after 3 consumer timeout cycles plus buffer (matches original 1.5h test)
     # Each cycle is (timeout_minutes + 1) since timeouts start at timeout+1 minutes
-    # Add 2 minutes buffer to ensure both cycles complete
-    perftest_delay_seconds = (2 * (consumer_timeout_minutes + 1) + 2) * 60
+    # Add 2 minutes buffer to ensure all three cycles complete
+    perftest_delay_seconds = (3 * (consumer_timeout_minutes + 1) + 2) * 60
     def start_perftest_delayed():
         print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
         time.sleep(perftest_delay_seconds)
@@ -511,9 +511,9 @@ def main():
     perftest_thread.start()
 
     print("Optimized reproduction test running...")
-    print(f"- Consumer timeouts: 5% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes")
-    print(f"- PerfTest workload: Starts after {perftest_delay_seconds//60} minutes with 2min on/5min off cycles")
-    print("- Expected bug trigger: Within 30 minutes of PerfTest start")
+    print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes (original pattern)")
+    print(f"- PerfTest workload: Starts after {perftest_delay_seconds//60} minutes (3 timeout cycles + buffer)")
+    print("- Fragmentation period: 95+ minutes (matches original 1.5+ hour successful test)")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
