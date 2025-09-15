@@ -288,9 +288,9 @@ def monitor_progress(queue_name, consumers, runtime_hours=8):
     end_time = start_time + (runtime_hours * 3600)
 
     while time.time() < end_time:
-        connection = pika.BlockingConnection(CONNECTION_PARAMS)
-        channel = connection.channel()
         try:
+            connection = pika.BlockingConnection(CONNECTION_PARAMS)
+            channel = connection.channel()
             method = channel.queue_declare(queue=queue_name, passive=True)
             ready_messages = method.method.message_count
             connection.close()
@@ -325,7 +325,7 @@ def monitor_progress(queue_name, consumers, runtime_hours=8):
         except Exception as e:
             print(f"Monitor error: {e}")
 
-        connection.process_data_events(60)  # Check every minute
+        time.sleep(60)  # Check every minute
 
 def create_initial_backlog(queue_name, consumer_timeout_ms, target_backlog=10000):
     """Create initial 10K message backlog"""
