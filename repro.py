@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-RabbitMQ message store bug reproduction
+RabbitMQ message store bug reproduction - Cyclic workload pattern
+Mimics user workload: fast publishes followed by slow consumption cycles
 """
 
 import pika
@@ -17,6 +18,14 @@ CONNECTION_PARAMS = None
 
 # Pre-computed message bodies
 MESSAGE_BODIES = []
+
+# Cycle configuration
+CYCLE_DURATION = 2 * 3600  # 2 hours per cycle
+FAST_PUBLISH_PHASE = 45 * 60  # 45 minutes
+SLOW_CONSUME_PHASE = 75 * 60  # 75 minutes
+TOTAL_CYCLES = 4  # 8 hours total runtime
+TARGET_BACKLOG = 16200  # 15k ready + 1.2k unacked
+BACKLOG_GROWTH_TOLERANCE = 1.1  # 10% growth over 8 hours
 
 def generate_message_bodies():
     """Pre-generate message bodies with specific characteristics"""
@@ -46,19 +55,55 @@ class DelayedAckConsumer(threading.Thread):
         self.pending_acks = {}
         self.running = True
         self.consumer_timeout_minutes = consumer_timeout_minutes
+        self.start_time = time.time()
+        self.last_backlog_check = 0
+        self.current_backlog = 0
+
+    def get_current_backlog(self):
+        """Get current queue backlog (ready + unacked messages)"""
+        try:
+            if self.channel and self.channel.is_open:
+                method = self.channel.queue_declare(queue=self.queue_name, passive=True)
+                ready_messages = method.method.message_count
+                # Estimate unacked from our pending acks
+                unacked_messages = len(self.pending_acks)
+                return ready_messages + unacked_messages
+        except Exception:
+            pass
+        return self.current_backlog  # Return cached value on error
 
     def callback(self, ch, method, properties, body):
         delivery_tag = method.delivery_tag
+        current_time = time.time()
 
-        # Random delay with 5% chance of long delay or timeout, rest are short for good flow (original pattern)
-        # Safe range: 0-5 minutes (for message flow), Timeout range: (timeout_minutes + 1) to (timeout_minutes + 3)
-        if random.random() < 0.05:
-            delay_seconds = random.randint(
-                (self.consumer_timeout_minutes // 2) * 60,
-                (self.consumer_timeout_minutes + 5) * 60
-            )  # Will timeout
+        # Update backlog periodically (every 30 seconds)
+        if current_time - self.last_backlog_check > 30:
+            self.current_backlog = self.get_current_backlog()
+            self.last_backlog_check = current_time
+
+        # Determine cycle phase
+        cycle_elapsed = (current_time - self.start_time) % CYCLE_DURATION
+        cycle_num = int((current_time - self.start_time) // CYCLE_DURATION) + 1
+
+        if cycle_elapsed < FAST_PUBLISH_PHASE:
+            # Fast consumption phase - prepare for slow phase
+            delay_seconds = random.uniform(0, 30)
         else:
-            delay_seconds = random.uniform(0, 300)  # Keep at 0-5 minutes for good flow
+            # Slow consumption phase - adapt based on backlog
+            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * (current_time - self.start_time) / (8 * 3600))
+
+            if self.current_backlog > target_with_growth * 1.2:
+                # Backlog too high, process faster
+                if random.random() < 0.6:  # 60% faster processing
+                    delay_seconds = random.randint(1800, 3600)  # 30min-1hr
+                else:
+                    delay_seconds = random.randint(3600, 5400)  # 1-1.5hr
+            else:
+                # Normal slow processing (1+ hour as per user requirement)
+                if random.random() < 0.8:  # 80% long processing
+                    delay_seconds = random.randint(3600, 5400)  # 1-1.5hr
+                else:
+                    delay_seconds = random.uniform(0, 300)  # Some fast acks
 
         ack_time = datetime.now() + timedelta(seconds=delay_seconds)
         self.pending_acks[delivery_tag] = ack_time
@@ -66,6 +111,14 @@ class DelayedAckConsumer(threading.Thread):
     def open_channel_and_consume(self):
         self.channel = self.connection.channel()
         self.channel.basic_qos(prefetch_count=100)
+
+        # Ensure queue exists with proper arguments (consumer may start before publisher)
+        queue_args = {
+            'x-max-priority': 10,
+            'x-consumer-timeout': 86400000  # 24 hours in milliseconds
+        }
+        self.channel.queue_declare(queue=self.queue_name, durable=True, arguments=queue_args)
+
         self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
         print(f"Consumer {self.consumer_tag} started")
 
@@ -145,44 +198,62 @@ class DelayedAckConsumer(threading.Thread):
             if self.connection and not self.connection.is_closed:
                 self.connection.close()
 
-def publisher_worker(queue_name, publisher_id, runtime_hours=4):
-    """Publisher with priority messages that runs for specified hours"""
+def publisher_worker(queue_name, publisher_id, runtime_hours=8):
+    """Cyclic publisher: fast publishes followed by slow consumption phases"""
     try:
         connection = pika.BlockingConnection(CONNECTION_PARAMS)
         channel = connection.channel()
 
-        end_time = time.time() + (runtime_hours * 3600)  # 4 hours
+        start_time = time.time()
+        end_time = start_time + (runtime_hours * 3600)
         message_count = 0
 
+        print(f"Publisher {publisher_id} starting cyclic workload for {runtime_hours} hours")
+
         while time.time() < end_time:
-            # Check queue depth every 100 messages
-            if message_count % 100 == 0:
+            current_time = time.time()
+            cycle_elapsed = (current_time - start_time) % CYCLE_DURATION
+            cycle_num = int((current_time - start_time) // CYCLE_DURATION) + 1
+
+            # Check queue depth every 50 messages
+            if message_count % 50 == 0:
                 try:
                     method = channel.queue_declare(queue=queue_name, passive=True)
-                    queue_depth = method.method.message_count
+                    ready_messages = method.method.message_count
 
-                    # Adjust publishing rate based on queue depth
-                    if queue_depth < 5000:
-                        # Fast publishing to build backlog
-                        batch_size = 20
-                        sleep_time = 0.5
-                    elif queue_depth < 10000:
-                        # Medium publishing
-                        batch_size = 10
-                        sleep_time = 1.0
-                    else:
-                        # Slow maintenance publishing
-                        batch_size = 2
-                        sleep_time = 5.0
-                except:
-                    # Default to medium rate if can't check queue
-                    batch_size = 10
+                    # Calculate target backlog with growth allowance
+                    elapsed_hours = (current_time - start_time) / 3600
+                    target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / 8)
+
+                except Exception:
+                    ready_messages = TARGET_BACKLOG  # Default assumption
+                    target_with_growth = TARGET_BACKLOG
+
+            # Determine publishing behavior based on cycle phase
+            if cycle_elapsed < FAST_PUBLISH_PHASE:
+                # Fast publishing phase (45 minutes)
+                if ready_messages < target_with_growth:
+                    batch_size = 25  # ~200 msg/sec with 0.125s sleep
+                    sleep_time = 0.125
+                else:
+                    batch_size = 5   # Moderate rate
                     sleep_time = 1.0
+            else:
+                # Slow consumption phase (75 minutes) - maintain backlog
+                if ready_messages < target_with_growth * 0.8:
+                    batch_size = 10  # Moderate publishing
+                    sleep_time = 2.0
+                elif ready_messages > target_with_growth * 1.2:
+                    batch_size = 1   # Very slow publishing
+                    sleep_time = 10.0
+                else:
+                    batch_size = 3   # Maintenance publishing
+                    sleep_time = 5.0
 
             # Publish batch
             for i in range(batch_size):
-                # 90% priority 1, 10% priorities 2-10
-                if random.random() < 0.9:
+                # Priority distribution: 70% priority 1, 30% priorities 2-10
+                if random.random() < 0.7:
                     priority = 1
                 else:
                     priority = random.randint(2, 10)
@@ -201,193 +272,60 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=4):
                 message_count += 1
 
                 if message_count % 1000 == 0:
-                    print(f"Publisher {publisher_id}: {message_count} messages sent")
+                    phase = "FAST_PUBLISH" if cycle_elapsed < FAST_PUBLISH_PHASE else "SLOW_CONSUME"
+                    print(f"Publisher {publisher_id} [CYCLE_{cycle_num}_{phase}]: {message_count} messages sent")
 
             connection.process_data_events(sleep_time)
 
         connection.close()
-        print(f"Publisher {publisher_id} completed after {runtime_hours} hours")
+        print(f"Publisher {publisher_id} completed {message_count} messages in {runtime_hours} hours")
     except Exception as e:
         print(f"Publisher {publisher_id} error: {e}")
 
-def monitor_progress(queue_name, consumers, runtime_hours=4):
-    """Monitor and report progress every minute"""
-    end_time = time.time() + (runtime_hours * 3600)
+def monitor_progress(queue_name, consumers, runtime_hours=8):
+    """Monitor and report progress with cycle phase information"""
+    start_time = time.time()
+    end_time = start_time + (runtime_hours * 3600)
 
     while time.time() < end_time:
+        connection = pika.BlockingConnection(CONNECTION_PARAMS)
+        channel = connection.channel()
         try:
-            connection = pika.BlockingConnection(CONNECTION_PARAMS)
-            channel = connection.channel()
             method = channel.queue_declare(queue=queue_name, passive=True)
-            queue_depth = method.method.message_count
+            ready_messages = method.method.message_count
             connection.close()
 
-            active_consumers = sum(1 for c in consumers if c.is_alive())
-            elapsed_hours = (time.time() - (end_time - runtime_hours * 3600)) / 3600
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            elapsed_hours = elapsed_time / 3600
 
-            print(f"[{elapsed_hours:.1f}h] Queue depth: {queue_depth}, Active consumers: {active_consumers}")
+            # Determine cycle phase
+            cycle_elapsed = elapsed_time % CYCLE_DURATION
+            cycle_num = int(elapsed_time // CYCLE_DURATION) + 1
+
+            if cycle_elapsed < FAST_PUBLISH_PHASE:
+                phase = f"CYCLE_{cycle_num}_FAST_PUBLISH"
+                phase_remaining = (FAST_PUBLISH_PHASE - cycle_elapsed) / 60
+            else:
+                phase = f"CYCLE_{cycle_num}_SLOW_CONSUME"
+                phase_remaining = (CYCLE_DURATION - cycle_elapsed) / 60
+
+            # Calculate target backlog with growth
+            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / 8)
+
+            # Count active consumers and estimate unacked
+            active_consumers = sum(1 for c in consumers if c.is_alive())
+            total_pending_acks = sum(len(c.pending_acks) for c in consumers if hasattr(c, 'pending_acks'))
+
+            print(f"[{phase}] Time: {elapsed_hours:.1f}h | Phase remaining: {phase_remaining:.1f}min")
+            print(f"  Queue: {ready_messages} ready, ~{total_pending_acks} unacked (target: {target_with_growth:.0f})")
+            print(f"  Consumers: {active_consumers} active")
+            print()
 
         except Exception as e:
             print(f"Monitor error: {e}")
 
-        time.sleep(60)  # Report every minute
-
-def perftest_workload(base_queue_name, consumer_timeout_ms, runtime_hours=2):
-    """PerfTest-like concurrent workload with separate queue and bidirectional I/O"""
-    perftest_queue = f"perftest_{base_queue_name}"
-    print(f"Starting PerfTest-like workload on queue: {perftest_queue}")
-
-    # Declare the PerfTest queue
-    try:
-        setup_connection = pika.BlockingConnection(CONNECTION_PARAMS)
-        setup_channel = setup_connection.channel()
-        setup_channel.queue_declare(
-            queue=perftest_queue,
-            durable=True,
-            arguments={
-                'x-queue-type': 'classic',
-                'x-max-priority': 10,
-                'x-consumer-timeout': consumer_timeout_ms
-            }
-        )
-        setup_connection.close()
-        print(f"PerfTest queue {perftest_queue} declared")
-    except Exception as e:
-        print(f"PerfTest queue setup error: {e}")
-        return
-
-    def perftest_producer():
-        """PerfTest producer with cycling pattern"""
-        try:
-            connection = pika.BlockingConnection(CONNECTION_PARAMS)
-            channel = connection.channel()
-
-            end_time = time.time() + (runtime_hours * 3600)
-            cycle_count = 0
-
-            while time.time() < end_time:
-                cycle_count += 1
-                print(f"PerfTest producer cycle {cycle_count}: Starting 2-minute burst...")
-
-                # 2-minute active period
-                burst_end = time.time() + 120
-                message_count = 0
-
-                while time.time() < burst_end:
-                    # Smaller variable message sizes (4KB-16KB) to avoid memory alarms
-                    if random.random() < 0.3:
-                        # Use medium pre-computed messages
-                        base_body = random.choice(MESSAGE_BODIES[50:70])  # Medium messages
-                        target_size = random.randint(4096, 8192)  # 4-8KB
-                    elif random.random() < 0.6:
-                        base_body = random.choice(MESSAGE_BODIES[70:85])  # Large messages
-                        target_size = random.randint(8192, 12288)  # 8-12KB
-                    else:
-                        base_body = random.choice(MESSAGE_BODIES[85:])  # Largest messages
-                        target_size = random.randint(12288, 16384)  # 12-16KB
-
-                    # Pad to target size efficiently
-                    if len(base_body) < target_size:
-                        padding_needed = target_size - len(base_body)
-                        message_body = base_body + bytes([255] * padding_needed)
-                    else:
-                        message_body = base_body[:target_size]
-
-                    # Priority distribution similar to main workload (90% priority 1, 10% mixed)
-                    if random.random() < 0.9:
-                        priority = 1
-                    else:
-                        priority = random.randint(2, 10)
-
-                    channel.basic_publish(
-                        exchange='',
-                        routing_key=perftest_queue,
-                        body=message_body,
-                        properties=pika.BasicProperties(
-                            delivery_mode=2,  # Persistent
-                            priority=priority
-                        )
-                    )
-                    message_count += 1
-
-                print(f"PerfTest producer cycle {cycle_count}: Sent {message_count} messages, pausing...")
-
-                # 5-minute pause period
-                connection.process_data_events(300)
-
-            connection.close()
-            print("PerfTest producer completed")
-
-        except Exception as e:
-            print(f"PerfTest producer error: {e}")
-
-    def perftest_consumer():
-        """PerfTest consumer with multi-ack"""
-        try:
-            connection = pika.BlockingConnection(CONNECTION_PARAMS)
-            channel = connection.channel()
-            channel.basic_qos(prefetch_count=100)  # Same as main consumers
-
-            ack_batch = []
-            batch_size = 10  # Multi-ack every 10 messages
-
-            def callback(ch, method, properties, body):
-                ack_batch.append(method.delivery_tag)
-
-                # Multi-ack when batch is full
-                if len(ack_batch) >= batch_size:
-                    try:
-                        # Ack the highest delivery tag with multiple=True
-                        ch.basic_ack(delivery_tag=max(ack_batch), multiple=True)
-                        ack_batch.clear()
-                    except Exception as e:
-                        print(f"PerfTest consumer ack error: {e}")
-                        ack_batch.clear()
-
-            channel.basic_consume(queue=perftest_queue, on_message_callback=callback)
-
-            end_time = time.time() + (runtime_hours * 3600)
-            while time.time() < end_time:
-                try:
-                    connection.process_data_events(time_limit=1)
-
-                    # Periodic cleanup of remaining acks
-                    if ack_batch and random.random() < 0.1:  # 10% chance per second
-                        try:
-                            channel.basic_ack(delivery_tag=max(ack_batch), multiple=True)
-                            ack_batch.clear()
-                        except:
-                            ack_batch.clear()
-
-                except Exception as e:
-                    print(f"PerfTest consumer processing error: {e}")
-                    break
-
-            # Final ack cleanup
-            if ack_batch:
-                try:
-                    channel.basic_ack(delivery_tag=max(ack_batch), multiple=True)
-                except:
-                    pass
-
-            connection.close()
-            print("PerfTest consumer completed")
-
-        except Exception as e:
-            print(f"PerfTest consumer error: {e}")
-
-    # Start both producer and consumer threads
-    producer_thread = threading.Thread(target=perftest_producer)
-    consumer_thread = threading.Thread(target=perftest_consumer)
-
-    producer_thread.start()
-    consumer_thread.start()
-
-    # Wait for both to complete
-    producer_thread.join()
-    consumer_thread.join()
-
-    print("PerfTest workload completed")
+        connection.process_data_events(60)  # Check every minute
 
 def create_initial_backlog(queue_name, consumer_timeout_ms, target_backlog=10000):
     """Create initial 10K message backlog"""
@@ -435,8 +373,6 @@ def main():
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
     parser.add_argument('--consumer-timeout', type=int, default=30,
                        help='Consumer timeout in minutes (minimum: 5, default: 30)')
-    parser.add_argument('--enable-perftest', action='store_true', default=False,
-                       help='Enable PerfTest concurrent workload (default: disabled)')
     args = parser.parse_args()
 
     # Validate consumer timeout
@@ -482,26 +418,8 @@ def main():
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
     monitor_thread.start()
 
-    # Conditionally start PerfTest workload if enabled
-    if args.enable_perftest:
-        # Start PerfTest workload after 3 consumer timeout cycles plus buffer (matches original 1.5h test)
-        # Each cycle is (timeout_minutes + 1) since timeouts start at timeout+1 minutes
-        # Add 2 minutes buffer to ensure all three cycles complete
-        perftest_delay_seconds = (3 * (consumer_timeout_minutes + 1) + 2) * 60
-        def start_perftest_delayed():
-            print(f"Waiting {perftest_delay_seconds//60} minutes for consumer timeouts before starting PerfTest workload...")
-            time.sleep(perftest_delay_seconds)
-            perftest_workload(queue_name, consumer_timeout_ms, 2)
-
-        perftest_thread = threading.Thread(target=start_perftest_delayed)
-        perftest_thread.start()
-        perftest_status = f"PerfTest workload: Starts after {perftest_delay_seconds//60} minutes (3 timeout cycles + buffer)"
-    else:
-        perftest_status = "PerfTest workload: DISABLED (use --enable-perftest to enable)"
-
     print("Optimized reproduction test running...")
     print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes")
-    print(f"- {perftest_status}")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
