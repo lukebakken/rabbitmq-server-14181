@@ -399,10 +399,10 @@ def main():
 
     print("Starting publishers and consumers...")
 
-    # Start 15 publishers for 2-hour runtime
+    # Start 15 publishers for 8-hour runtime
     publishers = []
     for i in range(15):
-        t = threading.Thread(target=publisher_worker, args=(queue_name, i, 2))  # 2 hours
+        t = threading.Thread(target=publisher_worker, args=(queue_name, i, 8))  # 8 hours
         publishers.append(t)
         t.start()
 
@@ -415,19 +415,21 @@ def main():
         time.sleep(0.2)  # Stagger consumer starts
 
     # Start progress monitor
-    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 2))
+    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 8))
     monitor_thread.start()
 
-    print("Optimized reproduction test running...")
-    print(f"- Consumer timeouts: 1% of acks will timeout after {consumer_timeout_minutes + 1}+ minutes")
+    print("Cyclic reproduction test running...")
+    print(f"- Pattern: Fast publish (45min) → Slow consume (75min) × {TOTAL_CYCLES} cycles")
+    print(f"- Target backlog: {TARGET_BACKLOG} messages (10% growth allowed over 8 hours)")
+    print(f"- Consumer processing: 1-1.5 hour delays during slow phases")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
     try:
-        # Wait for publishers (2 hours)
+        # Wait for publishers (8 hours)
         for t in publishers:
             t.join()
-        print("All publishers completed after 2 hours")
+        print("All publishers completed after 8 hours")
 
         # Wait a bit more for final consumer processing
         time.sleep(300)  # 5 minutes
