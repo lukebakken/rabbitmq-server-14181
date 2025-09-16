@@ -27,6 +27,8 @@ TOTAL_CYCLES = 4  # 8 hours total runtime
 TARGET_BACKLOG = 16200  # 15k ready + 1.2k unacked
 BACKLOG_GROWTH_TOLERANCE = 1.1  # 10% growth over 8 hours
 
+CONSUMER_TIMEOUT = 86400000 # 24 hours in milliseconds
+
 def generate_message_bodies():
     """Pre-generate message bodies with specific characteristics"""
     global MESSAGE_BODIES
@@ -46,7 +48,7 @@ def generate_message_bodies():
     print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies")
 
 class DelayedAckConsumer(threading.Thread):
-    def __init__(self, queue_name, consumer_id, consumer_timeout_minutes):
+    def __init__(self, queue_name, consumer_id):
         super().__init__()
         self.queue_name = queue_name
         self.consumer_tag = f"delayed-ack-consumer-{consumer_id}"
@@ -54,7 +56,6 @@ class DelayedAckConsumer(threading.Thread):
         self.channel = None
         self.pending_acks = {}
         self.running = True
-        self.consumer_timeout_minutes = consumer_timeout_minutes
         self.start_time = time.time()
         self.last_backlog_check = 0
         self.current_backlog = 0
@@ -115,7 +116,7 @@ class DelayedAckConsumer(threading.Thread):
         # Ensure queue exists with proper arguments (consumer may start before publisher)
         queue_args = {
             'x-max-priority': 10,
-            'x-consumer-timeout': 86400000  # 24 hours in milliseconds
+            'x-consumer-timeout': CONSUMER_TIMEOUT # 24 hours in milliseconds
         }
         self.channel.queue_declare(queue=self.queue_name, durable=True, arguments=queue_args)
 
@@ -327,7 +328,7 @@ def monitor_progress(queue_name, consumers, runtime_hours=8):
 
         time.sleep(60)  # Check every minute
 
-def create_initial_backlog(queue_name, consumer_timeout_ms, target_backlog=10000):
+def create_initial_backlog(queue_name, target_backlog=10000):
     """Create initial 10K message backlog"""
     print(f"Creating initial backlog of {target_backlog} messages...")
 
@@ -339,9 +340,8 @@ def create_initial_backlog(queue_name, consumer_timeout_ms, target_backlog=10000
         queue=queue_name,
         durable=True,
         arguments={
-            'x-queue-type': 'classic',
             'x-max-priority': 10,
-            'x-consumer-timeout': consumer_timeout_ms
+            'x-consumer-timeout': CONSUMER_TIMEOUT # 24 hours in milliseconds
         }
     )
 
@@ -371,31 +371,20 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
-    parser.add_argument('--consumer-timeout', type=int, default=30,
-                       help='Consumer timeout in minutes (minimum: 5, default: 30)')
     args = parser.parse_args()
-
-    # Validate consumer timeout
-    if args.consumer_timeout < 5:
-        print("Error: --consumer-timeout must be at least 5 minutes")
-        sys.exit(1)
-
-    consumer_timeout_minutes = args.consumer_timeout
-    consumer_timeout_ms = consumer_timeout_minutes * 60 * 1000
 
     # Set up connection parameters
     CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host)
 
     print("Fixed RabbitMQ Message Store Bug Reproduction")
     print(f"Connecting to RabbitMQ at {args.host}")
-    print(f"Consumer timeout: {consumer_timeout_minutes} minutes")
     print("Generating message bodies...")
     generate_message_bodies()
 
     queue_name = f"priority_bug_test_{int(time.time())}"
 
     # Create initial backlog
-    create_initial_backlog(queue_name, consumer_timeout_ms)
+    create_initial_backlog(queue_name)
 
     print("Starting publishers and consumers...")
 
@@ -409,7 +398,7 @@ def main():
     # Start 20 consumers with delayed acks
     consumers = []
     for i in range(20):
-        consumer = DelayedAckConsumer(queue_name, i, consumer_timeout_minutes)
+        consumer = DelayedAckConsumer(queue_name, i)
         consumers.append(consumer)
         consumer.start()
         time.sleep(0.2)  # Stagger consumer starts
