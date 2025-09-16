@@ -23,9 +23,10 @@ MESSAGE_BODIES = []
 CYCLE_DURATION = 2 * 3600  # 2 hours per cycle
 FAST_PUBLISH_PHASE = 45 * 60  # 45 minutes
 SLOW_CONSUME_PHASE = 75 * 60  # 75 minutes
-TOTAL_CYCLES = 4  # 8 hours total runtime
+TOTAL_RUNTIME_HOURS = 72  # 3 days
+TOTAL_CYCLES = TOTAL_RUNTIME_HOURS // 2  # Calculate cycles from runtime
 TARGET_BACKLOG = 16200  # 15k ready + 1.2k unacked
-BACKLOG_GROWTH_TOLERANCE = 1.1  # 10% growth over 8 hours
+BACKLOG_GROWTH_TOLERANCE = 1.1  # 10% growth over total runtime
 
 CONSUMER_TIMEOUT = 86400000 # 24 hours in milliseconds
 
@@ -91,7 +92,7 @@ class DelayedAckConsumer(threading.Thread):
             delay_seconds = random.uniform(0, 30)
         else:
             # Slow consumption phase - adapt based on backlog
-            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * (current_time - self.start_time) / (8 * 3600))
+            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * (current_time - self.start_time) / (TOTAL_RUNTIME_HOURS * 3600))
 
             if self.current_backlog > target_with_growth * 1.2:
                 # Backlog too high, process faster
@@ -199,7 +200,7 @@ class DelayedAckConsumer(threading.Thread):
             if self.connection and not self.connection.is_closed:
                 self.connection.close()
 
-def publisher_worker(queue_name, publisher_id, runtime_hours=8):
+def publisher_worker(queue_name, publisher_id, runtime_hours=TOTAL_RUNTIME_HOURS):
     """Cyclic publisher: fast publishes followed by slow consumption phases"""
     try:
         connection = pika.BlockingConnection(CONNECTION_PARAMS)
@@ -224,7 +225,7 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=8):
 
                     # Calculate target backlog with growth allowance
                     elapsed_hours = (current_time - start_time) / 3600
-                    target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / 8)
+                    target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / TOTAL_RUNTIME_HOURS)
 
                 except Exception:
                     ready_messages = TARGET_BACKLOG  # Default assumption
@@ -283,7 +284,7 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=8):
     except Exception as e:
         print(f"Publisher {publisher_id} error: {e}")
 
-def monitor_progress(queue_name, consumers, runtime_hours=8):
+def monitor_progress(queue_name, consumers, runtime_hours=TOTAL_RUNTIME_HOURS):
     """Monitor and report progress with cycle phase information"""
     start_time = time.time()
     end_time = start_time + (runtime_hours * 3600)
@@ -312,7 +313,7 @@ def monitor_progress(queue_name, consumers, runtime_hours=8):
                 phase_remaining = (CYCLE_DURATION - cycle_elapsed) / 60
 
             # Calculate target backlog with growth
-            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / 8)
+            target_with_growth = TARGET_BACKLOG * (1 + 0.1 * elapsed_hours / TOTAL_RUNTIME_HOURS)
 
             # Count active consumers and estimate unacked
             active_consumers = sum(1 for c in consumers if c.is_alive())
@@ -391,7 +392,7 @@ def main():
     # Start 15 publishers for 8-hour runtime
     publishers = []
     for i in range(15):
-        t = threading.Thread(target=publisher_worker, args=(queue_name, i, 8))  # 8 hours
+        t = threading.Thread(target=publisher_worker, args=(queue_name, i, TOTAL_RUNTIME_HOURS))
         publishers.append(t)
         t.start()
 
@@ -404,21 +405,21 @@ def main():
         time.sleep(0.2)  # Stagger consumer starts
 
     # Start progress monitor
-    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, 8))
+    monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, TOTAL_RUNTIME_HOURS))
     monitor_thread.start()
 
     print("Cyclic reproduction test running...")
     print(f"- Pattern: Fast publish (45min) → Slow consume (75min) × {TOTAL_CYCLES} cycles")
-    print(f"- Target backlog: {TARGET_BACKLOG} messages (10% growth allowed over 8 hours)")
+    print(f"- Target backlog: {TARGET_BACKLOG} messages (10% growth allowed over {TOTAL_RUNTIME_HOURS} hours)")
     print(f"- Consumer processing: 1-1.5 hour delays during slow phases")
     print("Monitor RabbitMQ logs for function_clause errors")
     print("Press Ctrl+C to stop gracefully")
 
     try:
-        # Wait for publishers (8 hours)
+        # Wait for publishers
         for t in publishers:
             t.join()
-        print("All publishers completed after 8 hours")
+        print(f"All publishers completed after {TOTAL_RUNTIME_HOURS} hours")
 
         # Wait a bit more for final consumer processing
         time.sleep(300)  # 5 minutes
