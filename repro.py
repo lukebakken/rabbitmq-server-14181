@@ -4,14 +4,23 @@ RabbitMQ message store bug reproduction - Cyclic workload pattern
 Mimics user workload: fast publishes followed by slow consumption cycles
 """
 
+import logging
 import pika
 import threading
 import time
 import random
 import sys
-import functools
 import argparse
+import ssl
 from datetime import datetime, timedelta
+
+LOG_FORMAT = '%(asctime)s %(levelname)s %(message)s'
+LOGGER = logging.getLogger(__name__)
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+
+# Configure Pika logger to only show ERROR level and above
+logging.getLogger('pika').setLevel(logging.ERROR)
 
 # Global connection parameters
 CONNECTION_PARAMS = None
@@ -46,7 +55,7 @@ def generate_message_bodies():
         body = bytes([255] * size)
         MESSAGE_BODIES.append(body)
 
-    print(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies")
+    LOGGER.info(f"Generated {len(MESSAGE_BODIES)} pre-computed message bodies")
 
 class DelayedAckConsumer(threading.Thread):
     def __init__(self, queue_name, consumer_id):
@@ -122,7 +131,7 @@ class DelayedAckConsumer(threading.Thread):
         self.channel.queue_declare(queue=self.queue_name, durable=True, arguments=queue_args)
 
         self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.callback, consumer_tag=self.consumer_tag)
-        print(f"Consumer {self.consumer_tag} started")
+        LOGGER.info(f"Consumer {self.consumer_tag} started")
 
     def reconnect(self):
         """Reconnect after channel failure"""
@@ -131,12 +140,12 @@ class DelayedAckConsumer(threading.Thread):
             if self.connection is None or self.connection.is_closed:
                 # Connection is bad, recreate
                 self.connection = pika.BlockingConnection(CONNECTION_PARAMS)
-                print(f"Consumer {self.consumer_tag} reconnected")
-            print(f"Consumer {self.consumer_tag} recreating channel and starting")
+                LOGGER.info(f"Consumer {self.consumer_tag} reconnected")
+            LOGGER.info(f"Consumer {self.consumer_tag} recreating channel and starting")
             self.open_channel_and_consume()
             return True
         except Exception as e:
-            print(f"Consumer {self.consumer_tag} reconnect failed: {e}")
+            LOGGER.error(f"Consumer {self.consumer_tag} reconnect failed: {e}")
             return False
 
     def process_pending_acks(self):
@@ -157,7 +166,7 @@ class DelayedAckConsumer(threading.Thread):
                     # Channel closed, clear this ack (message will be redelivered)
                     del self.pending_acks[delivery_tag]
             except Exception as e:
-                print(f"Consumer {self.consumer_tag} ack error: {e}")
+                LOGGER.error(f"Consumer {self.consumer_tag} ack error: {e}")
                 # Clear the ack on error
                 if delivery_tag in self.pending_acks:
                     del self.pending_acks[delivery_tag]
@@ -177,7 +186,7 @@ class DelayedAckConsumer(threading.Thread):
             while self.running:
                 try:
                     if not self.channel or not self.channel.is_open:
-                        print(f"Consumer {self.consumer_tag} channel closed, reconnecting...")
+                        LOGGER.info(f"Consumer {self.consumer_tag} channel closed, reconnecting...")
                         if not self.reconnect():
                             self.connection.process_data_events(5)
                             continue
@@ -186,13 +195,13 @@ class DelayedAckConsumer(threading.Thread):
                     self.process_pending_acks()
 
                 except Exception as e:
-                    print(f"Consumer {self.consumer_tag} processing error: {e}")
+                    LOGGER.error(f"Consumer {self.consumer_tag} processing error: {e}")
                     # Try to reconnect on error
                     if not self.reconnect():
                         self.connection.process_data_events(5)
 
         except Exception as e:
-            print(f"Consumer {self.consumer_tag} error: {e}")
+            LOGGER.error(f"Consumer {self.consumer_tag} error: {e}")
         finally:
             self.running = False
             if self.connection and not self.connection.is_closed:
@@ -210,7 +219,7 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=TOTAL_RUNTIME_HOURS
         end_time = start_time + (runtime_hours * 3600)
         message_count = 0
 
-        print(f"Publisher {publisher_id} starting cyclic workload for {runtime_hours} hours")
+        LOGGER.info(f"Publisher {publisher_id} starting cyclic workload for {runtime_hours} hours")
 
         while time.time() < end_time:
             current_time = time.time()
@@ -275,14 +284,14 @@ def publisher_worker(queue_name, publisher_id, runtime_hours=TOTAL_RUNTIME_HOURS
 
                 if message_count % 1000 == 0:
                     phase = "FAST_PUBLISH" if cycle_elapsed < FAST_PUBLISH_PHASE else "SLOW_CONSUME"
-                    print(f"Publisher {publisher_id} [CYCLE_{cycle_num}_{phase}]: {message_count} messages sent")
+                    LOGGER.info(f"Publisher {publisher_id} [CYCLE_{cycle_num}_{phase}]: {message_count} messages sent")
 
             connection.process_data_events(sleep_time)
 
         connection.close()
-        print(f"Publisher {publisher_id} completed {message_count} messages in {runtime_hours} hours")
+        LOGGER.info(f"Publisher {publisher_id} completed {message_count} messages in {runtime_hours} hours")
     except Exception as e:
-        print(f"Publisher {publisher_id} error: {e}")
+        LOGGER.error(f"Publisher {publisher_id} error: {e}")
 
 def monitor_progress(queue_name, consumers, runtime_hours=TOTAL_RUNTIME_HOURS):
     """Monitor and report progress with cycle phase information"""
@@ -319,19 +328,19 @@ def monitor_progress(queue_name, consumers, runtime_hours=TOTAL_RUNTIME_HOURS):
             active_consumers = sum(1 for c in consumers if c.is_alive())
             total_pending_acks = sum(len(c.pending_acks) for c in consumers if hasattr(c, 'pending_acks'))
 
-            print(f"[{phase}] Time: {elapsed_hours:.1f}h | Phase remaining: {phase_remaining:.1f}min")
-            print(f"  Queue: {ready_messages} ready, ~{total_pending_acks} unacked (target: {target_with_growth:.0f})")
-            print(f"  Consumers: {active_consumers} active")
-            print()
+            LOGGER.info(f"[{phase}] Time: {elapsed_hours:.1f}h | Phase remaining: {phase_remaining:.1f}min")
+            LOGGER.info(f"  Queue: {ready_messages} ready, ~{total_pending_acks} unacked (target: {target_with_growth:.0f})")
+            LOGGER.info(f"  Consumers: {active_consumers} active")
+            LOGGER.info("")
 
         except Exception as e:
-            print(f"Monitor error: {e}")
+            LOGGER.error(f"Monitor error: {e}")
 
         time.sleep(60)  # Check every minute
 
 def create_initial_backlog(queue_name, target_backlog=10000):
     """Create initial 10K message backlog"""
-    print(f"Creating initial backlog of {target_backlog} messages...")
+    LOGGER.info(f"Creating initial backlog of {target_backlog} messages...")
 
     connection = pika.BlockingConnection(CONNECTION_PARAMS)
     channel = connection.channel()
@@ -361,10 +370,10 @@ def create_initial_backlog(queue_name, target_backlog=10000):
         )
 
         if i % 1000 == 0:
-            print(f"Backlog progress: {i}/{target_backlog}")
+            LOGGER.info(f"Backlog progress: {i}/{target_backlog}")
 
     connection.close()
-    print("Initial backlog created")
+    LOGGER.info("Initial backlog created")
 
 def main():
     global CONNECTION_PARAMS
@@ -372,25 +381,41 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
+    parser.add_argument('--port', default=5672, type=int, help='RabbitMQ port (default: 5672)')
     parser.add_argument('--username', default='guest', help='RabbitMQ user (default: guest)')
     parser.add_argument('--password', default='guest', help='RabbitMQ password (default: guest)')
     args = parser.parse_args()
 
     # Set up connection parameters
     creds = pika.PlainCredentials(username=args.username, password=args.password)
-    CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host, credentials=creds)
+    if args.port == 5671:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_options = pika.SSLOptions(ssl_context)
+        CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host, port=args.port,
+                                                      ssl_options=ssl_options, credentials=creds)
+    else:
+        CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host, port=args.port, credentials=creds)
 
-    print("Fixed RabbitMQ Message Store Bug Reproduction")
-    print(f"Connecting to RabbitMQ at {args.host}")
-    print("Generating message bodies...")
+    LOGGER.info("RabbitMQ Message Store Bug Reproduction")
+    LOGGER.info(f"Connecting to RabbitMQ at {args.host}")
+    LOGGER.info("Generating message bodies...")
     generate_message_bodies()
+
+    LOGGER.info("Testing connection...")
+    t_conn = pika.BlockingConnection(CONNECTION_PARAMS)
+    t_ch = t_conn.channel()
+    t_ch.close()
+    t_conn.close()
+    LOGGER.info("Done testing connection...")
 
     queue_name = f"priority_bug_test_{int(time.time())}"
 
     # Create initial backlog
     create_initial_backlog(queue_name)
 
-    print("Starting publishers and consumers...")
+    LOGGER.info("Starting publishers and consumers...")
 
     # Start 15 publishers for 8-hour runtime
     publishers = []
@@ -411,24 +436,24 @@ def main():
     monitor_thread = threading.Thread(target=monitor_progress, args=(queue_name, consumers, TOTAL_RUNTIME_HOURS))
     monitor_thread.start()
 
-    print("Cyclic reproduction test running...")
-    print(f"- Pattern: Fast publish (45min) → Slow consume (75min) × {TOTAL_CYCLES} cycles")
-    print(f"- Target backlog: {TARGET_BACKLOG} messages (10% growth allowed over {TOTAL_RUNTIME_HOURS} hours)")
-    print(f"- Consumer processing: 1-1.5 hour delays during slow phases")
-    print("Monitor RabbitMQ logs for function_clause errors")
-    print("Press Ctrl+C to stop gracefully")
+    LOGGER.info("Cyclic reproduction test running...")
+    LOGGER.info(f"- Pattern: Fast publish (45min) → Slow consume (75min) × {TOTAL_CYCLES} cycles")
+    LOGGER.info(f"- Target backlog: {TARGET_BACKLOG} messages (10% growth allowed over {TOTAL_RUNTIME_HOURS} hours)")
+    LOGGER.info(f"- Consumer processing: 1-1.5 hour delays during slow phases")
+    LOGGER.info("Monitor RabbitMQ logs for function_clause errors")
+    LOGGER.info("Press Ctrl+C to stop gracefully")
 
     try:
         # Wait for publishers
         for t in publishers:
             t.join()
-        print(f"All publishers completed after {TOTAL_RUNTIME_HOURS} hours")
+        LOGGER.info(f"All publishers completed after {TOTAL_RUNTIME_HOURS} hours")
 
         # Wait a bit more for final consumer processing
         time.sleep(300)  # 5 minutes
 
     except KeyboardInterrupt:
-        print("\nGracefully stopping test...")
+        LOGGER.info("\nGracefully stopping test...")
     finally:
         # Stop consumers
         for consumer in consumers:
@@ -444,13 +469,13 @@ def main():
             channel = connection.channel()
             channel.queue_delete(queue=queue_name)
             connection.close()
-            print(f"Cleaned up queue: {queue_name}")
+            LOGGER.info(f"Cleaned up queue: {queue_name}")
         except Exception as e:
-            print(f"Cleanup error: {e}")
+            LOGGER.error(f"Cleanup error: {e}")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"Error: {e}")
+        LOGGER.error(f"Error: {e}")
         sys.exit(1)
