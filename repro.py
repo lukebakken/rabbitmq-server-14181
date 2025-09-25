@@ -372,10 +372,13 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RabbitMQ message store bug reproduction')
     parser.add_argument('--host', default='localhost', help='RabbitMQ host (default: localhost)')
+    parser.add_argument('--username', default='guest', help='RabbitMQ user (default: guest)')
+    parser.add_argument('--password', default='guest', help='RabbitMQ password (default: guest)')
     args = parser.parse_args()
 
     # Set up connection parameters
-    CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host)
+    creds = pika.PlainCredentials(username=args.username, password=args.password)
+    CONNECTION_PARAMS = pika.ConnectionParameters(host=args.host, credentials=creds)
 
     print("Fixed RabbitMQ Message Store Bug Reproduction")
     print(f"Connecting to RabbitMQ at {args.host}")
